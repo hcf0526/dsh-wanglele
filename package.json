@@ -1,7 +1,7 @@
 {
   "name": "@wanglele/dsh-gpt-pwsh-compat",
-  "version": "0.1.0",
-  "description": "GPT-scoped pwsh schema compatibility plugin for DeepSeek Harness",
+  "version": "0.1.1",
+  "description": "GPT pwsh compatibility and DeepSeek upstream retry plugin for DeepSeek Harness",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",

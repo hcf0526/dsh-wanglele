@@ -1,22 +1,41 @@
-# DSH GPT pwsh Compatibility Plugin
+# DSH Model Compatibility Plugin
 
-This plugin removes two optional escalation properties from the `pwsh` tool
-schema when the selected model id matches `^gpt(?:-|$)`:
+This plugin provides model-specific compatibility fixes for DeepSeek Harness.
+
+## Features
+
+### Fix GPT `pwsh` tool-call failures
+
+When the selected model id matches `^gpt(?:-|$)`, the plugin removes two
+escalation properties from the GPT-visible `pwsh` tool schema:
 
 - `sandbox_permissions`
 - `justification`
 
-The patch addresses GPT Responses tool calls that eagerly populate every
-optional property. In DSH `0.1.0-rc.6`, that behavior can produce either of
-these errors before PowerShell starts:
+GPT Responses models may eagerly populate every optional property. In DSH
+`0.1.0-rc.6`, that behavior can produce either of these errors before
+PowerShell starts:
 
 ```text
 invalid justification: expected a non-empty sentence
 sandbox escalation to "danger-full-access" is not strictly wider than this call's current "danger-full-access" mode
 ```
 
-DeepSeek, Claude, other model families, other tools, and the `pwsh` executor
-are left unchanged.
+Other model families, other tools, and the `pwsh` executor remain unchanged by
+this fix.
+
+### Retry transient DeepSeek upstream errors
+
+When the selected model id matches `^deepseek(?:-|$)`, the plugin handles these
+upstream HTTP failures before DSH's generic retry policy:
+
+- `503`: the upstream system is under CPU overload; wait 10 seconds, then send
+  the request again.
+- `429`: the upstream request limit has been reached; wait 30 seconds, then send
+  the request again.
+
+Each wait is cancelled immediately if the active turn is aborted. Other HTTP
+statuses and non-DeepSeek models continue through DSH's normal error handling.
 
 ## Install
 
@@ -41,10 +60,15 @@ dsh --profile web --dump-config | Select-String 'gpt-pwsh-compat'
 
 ## Implementation
 
-The plugin participates in the authoritative `system-prompt/assemble`
-waterfall. It waits for downstream model selection, reads
-`assembled.variables.model`, and clones only the GPT-visible `pwsh` schema.
-The original tool registration and execution callbacks remain intact.
+For GPT, the plugin participates in the authoritative
+`system-prompt/assemble` waterfall. It waits for downstream model selection,
+reads `assembled.variables.model`, and clones only the GPT-visible `pwsh`
+schema. The original tool registration and execution callbacks remain intact.
+
+For DeepSeek, the plugin prepends a global `agent/request-error` waterfall
+listener. Matching `503` and `429` failures use abort-aware fixed delays and
+return `{ kind: "retry" }`, causing the agent loop to resend the same model
+request.
 
 ## Compatibility
 

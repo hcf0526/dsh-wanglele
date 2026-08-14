@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   apply,
+  deepSeekRetryDelay,
   inject,
+  isDeepSeekModel,
   isGptModel,
   name,
   patchAssembly,
@@ -32,19 +34,37 @@ function pwshSchema() {
   };
 }
 
-function captureAssemblyListener() {
-  let registration;
-  apply({
-    on(event, listener, options) {
-      registration = { event, listener, options };
+function captureListeners(internals) {
+  const registrations = [];
+  apply(
+    {
+      on(event, listener, options) {
+        const registration = { event, listener, options };
+        registrations.push(registration);
+        return () => true;
+      },
     },
-  });
-  return registration;
+    {},
+    internals,
+  );
+  return registrations;
+}
+
+function captureAssemblyListener() {
+  return captureListeners().find(
+    (registration) => registration.event === "system-prompt/assemble",
+  );
+}
+
+function captureRequestErrorListener(wait) {
+  return captureListeners({ wait }).find(
+    (registration) => registration.event === "agent/request-error",
+  );
 }
 
 test("exports a globally scoped DSH plugin", () => {
   assert.equal(name, "gpt-pwsh-compat");
-  assert.deepEqual(inject, ["systemPrompt"]);
+  assert.deepEqual(inject, ["systemPrompt", "agents"]);
 
   const registration = captureAssemblyListener();
   assert.equal(registration.event, "system-prompt/assemble");
@@ -173,3 +193,87 @@ for (const model of ["deepseek-v3.2", "claude-sonnet-4-6", undefined]) {
     );
   });
 }
+
+test("matches conservative DeepSeek model identifiers", () => {
+  assert.equal(isDeepSeekModel("deepseek-v3.2"), true);
+  assert.equal(isDeepSeekModel("DeepSeek-R1"), true);
+  assert.equal(isDeepSeekModel("deepseek"), true);
+  assert.equal(isDeepSeekModel("my-deepseek-v3"), false);
+  assert.equal(isDeepSeekModel("gpt-5.6-sol"), false);
+  assert.equal(isDeepSeekModel(undefined), false);
+});
+
+test("maps DeepSeek 503 and 429 failures to fixed retry delays", () => {
+  assert.equal(deepSeekRetryDelay("deepseek-v3.2", { status: 503 }), 10_000);
+  assert.equal(deepSeekRetryDelay("deepseek-r1", { status: 429 }), 30_000);
+  assert.equal(deepSeekRetryDelay("deepseek-v3.2", { status: 500 }), undefined);
+  assert.equal(deepSeekRetryDelay("gpt-5.6-sol", { status: 503 }), undefined);
+  assert.equal(deepSeekRetryDelay("deepseek-v3.2", null), undefined);
+});
+
+test("retries DeepSeek 503 and 429 responses after their fixed waits", async () => {
+  const waits = [];
+  const registration = captureRequestErrorListener(async (delayMs, signal) => {
+    waits.push({ delayMs, signal });
+    return true;
+  });
+  assert.deepEqual(registration.options, { global: true, prepend: true });
+
+  for (const [status, delayMs] of [
+    [503, 10_000],
+    [429, 30_000],
+  ]) {
+    const controller = new AbortController();
+    let delegated = false;
+    const result = await registration.listener(
+      {
+        agent: { options: { model: "deepseek-v3.2" } },
+        failure: { status },
+        signal: controller.signal,
+      },
+      async () => {
+        delegated = true;
+        return undefined;
+      },
+    );
+
+    assert.deepEqual(result, { kind: "retry" });
+    assert.equal(delegated, false);
+    assert.equal(waits.at(-1).delayMs, delayMs);
+    assert.equal(waits.at(-1).signal, controller.signal);
+  }
+});
+
+test("delegates unrelated failures and cancels a pending DeepSeek retry", async () => {
+  const registration = captureRequestErrorListener(async () => false);
+  let delegated = 0;
+  const next = async () => {
+    delegated += 1;
+    return { kind: "downstream" };
+  };
+
+  assert.deepEqual(
+    await registration.listener(
+      {
+        agent: { options: { model: "gpt-5.6-sol" } },
+        failure: { status: 503 },
+        signal: new AbortController().signal,
+      },
+      next,
+    ),
+    { kind: "downstream" },
+  );
+
+  assert.equal(
+    await registration.listener(
+      {
+        agent: { options: { model: "deepseek-v3.2" } },
+        failure: { status: 503 },
+        signal: new AbortController().signal,
+      },
+      next,
+    ),
+    undefined,
+  );
+  assert.equal(delegated, 1);
+});

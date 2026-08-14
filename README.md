@@ -4,25 +4,25 @@ This plugin provides model-specific compatibility fixes for DeepSeek Harness.
 
 ## Features
 
-### Fix GPT `pwsh` tool-call failures
+### Fix GPT `pwsh` and `edit` tool-call failures
 
 When the selected model id matches `^gpt(?:-|$)`, the plugin removes two
-escalation properties from the GPT-visible `pwsh` tool schema:
+escalation properties from the GPT-visible `pwsh` and `edit` tool schemas:
 
 - `sandbox_permissions`
 - `justification`
 
 GPT Responses models may eagerly populate every optional property. In DSH
 `0.1.0-rc.6`, that behavior can produce either of these errors before
-PowerShell starts:
+the tool starts:
 
 ```text
 invalid justification: expected a non-empty sentence
 sandbox escalation to "danger-full-access" is not strictly wider than this call's current "danger-full-access" mode
 ```
 
-Other model families, other tools, and the `pwsh` executor remain unchanged by
-this fix.
+Other model families, other tools, and the `pwsh` / `edit` executors remain
+unchanged by this fix.
 
 ### Retry transient DeepSeek upstream errors
 
@@ -62,7 +62,8 @@ dsh --profile web --dump-config | Select-String 'gpt-pwsh-compat'
 
 For GPT, the plugin participates in the authoritative
 `system-prompt/assemble` waterfall. It waits for downstream model selection,
-reads `assembled.variables.model`, and clones only the GPT-visible `pwsh`
+reads `assembled.variables.model`, and clones only the GPT-visible `pwsh` and
+`edit`
 schema. The original tool registration and execution callbacks remain intact.
 
 For DeepSeek, the plugin prepends a global `agent/request-error` waterfall
@@ -74,7 +75,7 @@ request.
 
 - DeepSeek Harness: `0.1.0-rc.6`
 - Node.js: `20` or newer
-- Platform: any DSH host; the affected tool is Windows PowerShell
+- Platform: any DSH host
 
 ## License
 

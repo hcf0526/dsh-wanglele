@@ -9,6 +9,7 @@ import {
   isGptModel,
   name,
   patchAssembly,
+  patchGptToolSchema,
   patchPwshSchema,
 } from "../lib/index.js";
 
@@ -27,6 +28,32 @@ function pwshSchema() {
       required: [
         "command",
         "description",
+        "sandbox_permissions",
+        "justification",
+      ],
+    },
+  };
+}
+
+function editSchema() {
+  return {
+    name: "edit",
+    description: "Edit a UTF-8 text file",
+    parameters: {
+      type: "object",
+      properties: {
+        file_path: { type: "string" },
+        old_string: { type: "string" },
+        new_string: { type: "string" },
+        replace_all: { type: "boolean" },
+        sandbox_permissions: { type: "string" },
+        justification: { type: "string" },
+      },
+      required: [
+        "file_path",
+        "old_string",
+        "new_string",
+        "replace_all",
         "sandbox_permissions",
         "justification",
       ],
@@ -98,7 +125,30 @@ test("removes GPT-unsafe fields from the pwsh schema", () => {
   );
 });
 
-test("changes only the pwsh tool and keeps malformed schemas harmless", () => {
+test("removes GPT-unsafe fields from the edit schema", () => {
+  const original = editSchema();
+  const patched = patchGptToolSchema(original);
+
+  assert.notEqual(patched, original);
+  assert.deepEqual(Object.keys(patched.parameters.properties), [
+    "file_path",
+    "old_string",
+    "new_string",
+    "replace_all",
+  ]);
+  assert.deepEqual(patched.parameters.required, [
+    "file_path",
+    "old_string",
+    "new_string",
+    "replace_all",
+  ]);
+  assert.equal(
+    Object.hasOwn(original.parameters.properties, "sandbox_permissions"),
+    true,
+  );
+});
+
+test("changes only supported GPT tools and keeps malformed schemas harmless", () => {
   const otherTool = {
     name: "fs_read",
     parameters: { type: "object", properties: { path: { type: "string" } } },
@@ -108,7 +158,7 @@ test("changes only the pwsh tool and keeps malformed schemas harmless", () => {
     sections: [],
     contexts: [],
     variables: { model: "gpt-5.6-terra" },
-    tools: [otherTool, malformedPwsh, pwshSchema()],
+    tools: [otherTool, malformedPwsh, pwshSchema(), editSchema()],
   };
 
   const patched = patchAssembly(original);
@@ -116,6 +166,7 @@ test("changes only the pwsh tool and keeps malformed schemas harmless", () => {
   assert.equal(patched.tools[0], otherTool);
   assert.equal(patched.tools[1], malformedPwsh);
   assert.notEqual(patched.tools[2], original.tools[2]);
+  assert.notEqual(patched.tools[3], original.tools[3]);
   assert.equal(patchAssembly(patched), patched);
 });
 

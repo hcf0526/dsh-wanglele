@@ -34,6 +34,7 @@ export declare function cancellableDelay(
   delayMs: number,
   signal: AbortSignal,
 ): Promise<boolean>;
+export declare function patchGptToolSchema<T>(tool: T): T;
 export declare function patchPwshSchema<T>(tool: T): T;
 export declare function patchAssembly<T>(assembly: T): T;
 export declare function apply(

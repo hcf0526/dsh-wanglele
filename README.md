@@ -4,16 +4,17 @@ This plugin provides model-specific compatibility fixes for DeepSeek Harness.
 
 ## Features
 
-### Fix GPT `pwsh` and `edit` tool-call failures
+### Fix GPT and Gemini 3 Flash tool-call failures
 
-When the selected model id matches `^gpt(?:-|$)`, the plugin removes two
-escalation properties from the GPT-visible `pwsh` and `edit` tool schemas:
+When the selected model id matches `^gpt` or a Gemini 3 Flash model id such as
+`gemini-3.7-flash`, the plugin removes two escalation properties from the
+model-visible `pwsh` and `edit` tool schemas:
 
 - `sandbox_permissions`
 - `justification`
 
-GPT Responses models may eagerly populate every optional property. In DSH
-`0.1.0-rc.6`, that behavior can produce either of these errors before
+Some OpenAI Responses-compatible model routes eagerly populate every optional
+property. In DSH `0.1.0-rc.6`, that can produce either of these errors before
 the tool starts:
 
 ```text
@@ -21,21 +22,23 @@ invalid justification: expected a non-empty sentence
 sandbox escalation to "danger-full-access" is not strictly wider than this call's current "danger-full-access" mode
 ```
 
-Other model families, other tools, and the `pwsh` / `edit` executors remain
-unchanged by this fix.
+### Recover malformed Gemini tool streams
 
-### Retry transient DeepSeek upstream errors
+Some Gemini 3 Flash routes behind an OpenAI Responses-compatible gateway emit a
+`response.function_call_arguments.done` event without its required `arguments`
+string. The installed `pi-ai` parser then fails with:
 
-When the selected model id matches `^deepseek(?:-|$)`, the plugin handles these
-upstream HTTP failures before DSH's generic retry policy:
+```text
+Cannot read properties of undefined (reading 'startsWith')
+```
 
-- `503`: the upstream system is under CPU overload; wait 10 seconds, then send
-  the request again.
-- `429`: the upstream request limit has been reached; wait 30 seconds, then send
-  the request again.
+The plugin wraps the DSH `llm/stream` waterfall for Gemini 3 Flash, preserves
+the tool-call argument deltas already received, closes the incomplete tool call,
+and converts the malformed error finish into a normal tool-call finish. Other
+models, stream failures, and incomplete calls without a tool name continue
+through normal error handling.
 
-Each wait is cancelled immediately if the active turn is aborted. Other HTTP
-statuses and non-DeepSeek models continue through DSH's normal error handling.
+Other model families and tool executors remain unchanged by these fixes.
 
 ## Install
 
@@ -60,16 +63,17 @@ dsh --profile web --dump-config | Select-String 'gpt-pwsh-compat'
 
 ## Implementation
 
-For GPT, the plugin participates in the authoritative
+For GPT and Gemini 3 Flash, the plugin participates in the authoritative
 `system-prompt/assemble` waterfall. It waits for downstream model selection,
-reads `assembled.variables.model`, and clones only the GPT-visible `pwsh` and
-`edit`
-schema. The original tool registration and execution callbacks remain intact.
+reads `assembled.variables.model`, and clones only the model-visible `pwsh` and
+`edit` schema. The original tool registration and execution callbacks remain
+intact.
 
-For DeepSeek, the plugin prepends a global `agent/request-error` waterfall
-listener. Matching `503` and `429` failures use abort-aware fixed delays and
-return `{ kind: "retry" }`, causing the agent loop to resend the same model
-request.
+For Gemini 3 Flash, the plugin also wraps the global `llm/stream` waterfall. It
+tracks open tool calls and their argument deltas. If the known pi-ai
+`startsWith` failure arrives before the tool-call block closes, it emits the
+missing block end and a `{ kind: "tool-calls" }` finish so the normal DSH tool
+scheduler can execute the call.
 
 ## Compatibility
 

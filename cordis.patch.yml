@@ -1,4 +1,4 @@
-# Activate the GPT-scoped pwsh compatibility plugin as a DSH bundle layer.
+# Activate the model compatibility plugin as a DSH bundle layer.
 - insert:
     - id: gpt-pwsh-compat
       name: '@wanglele/dsh-gpt-pwsh-compat'

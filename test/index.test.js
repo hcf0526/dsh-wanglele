@@ -3,14 +3,15 @@ import assert from "node:assert/strict";
 
 import {
   apply,
-  deepSeekRetryDelay,
   inject,
-  isDeepSeekModel,
+  isGeminiFlashModel,
+  isGeminiToolStreamFailure,
   isGptModel,
   name,
   patchAssembly,
   patchGptToolSchema,
   patchPwshSchema,
+  recoverGeminiToolCallStream,
 } from "../lib/index.js";
 
 function pwshSchema() {
@@ -61,19 +62,15 @@ function editSchema() {
   };
 }
 
-function captureListeners(internals) {
+function captureListeners() {
   const registrations = [];
-  apply(
-    {
-      on(event, listener, options) {
-        const registration = { event, listener, options };
-        registrations.push(registration);
-        return () => true;
-      },
+  apply({
+    on(event, listener, options) {
+      const registration = { event, listener, options };
+      registrations.push(registration);
+      return () => true;
     },
-    {},
-    internals,
-  );
+  });
   return registrations;
 }
 
@@ -83,19 +80,32 @@ function captureAssemblyListener() {
   );
 }
 
-function captureRequestErrorListener(wait) {
-  return captureListeners({ wait }).find(
-    (registration) => registration.event === "agent/request-error",
+function captureStreamListener() {
+  return captureListeners().find(
+    (registration) => registration.event === "llm/stream",
   );
 }
 
-test("exports a globally scoped DSH plugin", () => {
+async function collect(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return chunks;
+}
+
+test("exports a globally scoped DSH compatibility plugin", () => {
   assert.equal(name, "gpt-pwsh-compat");
   assert.deepEqual(inject, ["systemPrompt", "agents"]);
 
-  const registration = captureAssemblyListener();
-  assert.equal(registration.event, "system-prompt/assemble");
-  assert.deepEqual(registration.options, { global: true });
+  const registrations = captureListeners();
+  assert.equal(registrations.length, 2);
+  const assembly = registrations.find(
+    (registration) => registration.event === "system-prompt/assemble",
+  );
+  const stream = registrations.find(
+    (registration) => registration.event === "llm/stream",
+  );
+  assert.deepEqual(assembly.options, { global: true });
+  assert.deepEqual(stream.options, { global: true });
 });
 
 test("matches only conservative GPT model identifiers", () => {
@@ -106,6 +116,16 @@ test("matches only conservative GPT model identifiers", () => {
   assert.equal(isGptModel("deepseek-v3.2"), false);
   assert.equal(isGptModel("claude-sonnet-4-6"), false);
   assert.equal(isGptModel(undefined), false);
+});
+
+test("matches conservative Gemini 3 Flash model identifiers", () => {
+  assert.equal(isGeminiFlashModel("gemini-3.7-flash"), true);
+  assert.equal(isGeminiFlashModel("GEMINI-3.1-FLASH-preview"), true);
+  assert.equal(isGeminiFlashModel("gemini-3-flash"), true);
+  assert.equal(isGeminiFlashModel("gemini-2.5-flash"), false);
+  assert.equal(isGeminiFlashModel("gemini-3.7-pro"), false);
+  assert.equal(isGeminiFlashModel("gpt-5.6-terra"), false);
+  assert.equal(isGeminiFlashModel(undefined), false);
 });
 
 test("removes GPT-unsafe fields from the pwsh schema", () => {
@@ -217,6 +237,34 @@ test("uses the agent option as a GPT fallback during assembly", async () => {
   assert.notEqual(result, downstream);
 });
 
+test("patches Gemini 3 Flash assemblies with the same unsafe-field removal", async () => {
+  const registration = captureAssemblyListener();
+  const downstream = {
+    sections: [],
+    contexts: [],
+    variables: { model: "gemini-3.7-flash" },
+    tools: [pwshSchema(), editSchema()],
+  };
+
+  const result = await registration.listener(
+    downstream,
+    {},
+    async () => downstream,
+  );
+
+  assert.notEqual(result, downstream);
+  for (const tool of result.tools) {
+    assert.equal(
+      Object.hasOwn(tool.parameters.properties, "sandbox_permissions"),
+      false,
+    );
+    assert.equal(
+      Object.hasOwn(tool.parameters.properties, "justification"),
+      false,
+    );
+  }
+});
+
 for (const model of ["deepseek-v3.2", "claude-sonnet-4-6", undefined]) {
   test(`leaves ${model ?? "missing-model"} assemblies untouched`, async () => {
     const registration = captureAssemblyListener();
@@ -245,86 +293,218 @@ for (const model of ["deepseek-v3.2", "claude-sonnet-4-6", undefined]) {
   });
 }
 
-test("matches conservative DeepSeek model identifiers", () => {
-  assert.equal(isDeepSeekModel("deepseek-v3.2"), true);
-  assert.equal(isDeepSeekModel("DeepSeek-R1"), true);
-  assert.equal(isDeepSeekModel("deepseek"), true);
-  assert.equal(isDeepSeekModel("my-deepseek-v3"), false);
-  assert.equal(isDeepSeekModel("gpt-5.6-sol"), false);
-  assert.equal(isDeepSeekModel(undefined), false);
+test("recognizes the malformed Gemini tool-stream failure", () => {
+  assert.equal(
+    isGeminiToolStreamFailure({
+      kind: "error",
+      failure: {
+        message: "Cannot read properties of undefined (reading 'startsWith')",
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isGeminiToolStreamFailure({
+      kind: "error",
+      failure: { message: "invalid request" },
+    }),
+    false,
+  );
+  assert.equal(isGeminiToolStreamFailure({ kind: "tool-calls" }), false);
 });
 
-test("maps DeepSeek 503 and 429 failures to fixed retry delays", () => {
-  assert.equal(deepSeekRetryDelay("deepseek-v3.2", { status: 503 }), 10_000);
-  assert.equal(deepSeekRetryDelay("deepseek-r1", { status: 429 }), 30_000);
-  assert.equal(deepSeekRetryDelay("deepseek-v3.2", { status: 500 }), undefined);
-  assert.equal(deepSeekRetryDelay("gpt-5.6-sol", { status: 503 }), undefined);
-  assert.equal(deepSeekRetryDelay("deepseek-v3.2", null), undefined);
+test("recovers an incomplete Gemini tool call from accumulated stream chunks", async () => {
+  const source = (async function* () {
+    yield { type: "block-start", index: 0, blockType: "tool-call" };
+    yield {
+      type: "tool-call-delta",
+      index: 0,
+      id: "call-1",
+      name: "pwsh",
+      argumentsDelta: '{"command":"pwd"}',
+    };
+    yield {
+      type: "usage",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    };
+    yield {
+      type: "finish",
+      reason: {
+        kind: "error",
+        failure: {
+          message: "Cannot read properties of undefined (reading 'startsWith')",
+          code: "PI_AI_ERROR",
+        },
+      },
+    };
+  })();
+
+  const result = await collect(
+    recoverGeminiToolCallStream("gemini-3.7-flash", source),
+  );
+
+  assert.deepEqual(result, [
+    { type: "block-start", index: 0, blockType: "tool-call" },
+    {
+      type: "tool-call-delta",
+      index: 0,
+      id: "call-1",
+      name: "pwsh",
+      argumentsDelta: '{"command":"pwd"}',
+    },
+    { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } },
+    {
+      type: "block-end",
+      index: 0,
+      block: {
+        type: "tool-call",
+        id: "call-1",
+        name: "pwsh",
+        arguments: '{"command":"pwd"}',
+      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
 });
 
-test("retries DeepSeek 503 and 429 responses after their fixed waits", async () => {
-  const waits = [];
-  const registration = captureRequestErrorListener(async (delayMs, signal) => {
-    waits.push({ delayMs, signal });
-    return true;
-  });
-  assert.deepEqual(registration.options, { global: true, prepend: true });
+test("closes an open reasoning block before recovered Gemini tool calls", async () => {
+  const source = (async function* () {
+    yield { type: "block-start", index: 0, blockType: "reasoning" };
+    yield { type: "reasoning-delta", index: 0, text: "thinking" };
+    yield { type: "block-start", index: 1, blockType: "tool-call" };
+    yield {
+      type: "tool-call-delta",
+      index: 1,
+      id: "call-4",
+      name: "pwsh",
+      argumentsDelta: "{}",
+    };
+    yield {
+      type: "finish",
+      reason: {
+        kind: "error",
+        failure: {
+          message: "Cannot read properties of undefined (reading 'startsWith')",
+        },
+      },
+    };
+  })();
 
-  for (const [status, delayMs] of [
-    [503, 10_000],
-    [429, 30_000],
-  ]) {
-    const controller = new AbortController();
-    let delegated = false;
-    const result = await registration.listener(
-      {
-        agent: { options: { model: "deepseek-v3.2" } },
-        failure: { status },
-        signal: controller.signal,
+  const result = await collect(
+    recoverGeminiToolCallStream("gemini-3.7-flash", source),
+  );
+
+  assert.deepEqual(result.slice(-3), [
+    {
+      type: "block-end",
+      index: 0,
+      block: { type: "reasoning", text: "thinking" },
+    },
+    {
+      type: "block-end",
+      index: 1,
+      block: {
+        type: "tool-call",
+        id: "call-4",
+        name: "pwsh",
+        arguments: "{}",
       },
-      async () => {
-        delegated = true;
-        return undefined;
-      },
+    },
+    { type: "finish", reason: { kind: "tool-calls" } },
+  ]);
+});
+
+test("recovers the same Gemini failure when the stream throws directly", async () => {
+  const source = (async function* () {
+    yield { type: "block-start", index: 2, blockType: "tool-call" };
+    yield {
+      type: "tool-call-delta",
+      index: 2,
+      id: "call-2",
+      name: "edit",
+      argumentsDelta: '{"file_path":"x"}',
+    };
+    throw new TypeError(
+      "Cannot read properties of undefined (reading 'startsWith')",
     );
+  })();
 
-    assert.deepEqual(result, { kind: "retry" });
-    assert.equal(delegated, false);
-    assert.equal(waits.at(-1).delayMs, delayMs);
-    assert.equal(waits.at(-1).signal, controller.signal);
-  }
+  const result = await collect(
+    recoverGeminiToolCallStream("gemini-3.7-flash", source),
+  );
+
+  assert.deepEqual(result.at(-1), {
+    type: "finish",
+    reason: { kind: "tool-calls" },
+  });
+  assert.deepEqual(result.at(-2), {
+    type: "block-end",
+    index: 2,
+    block: {
+      type: "tool-call",
+      id: "call-2",
+      name: "edit",
+      arguments: '{"file_path":"x"}',
+    },
+  });
 });
 
-test("delegates unrelated failures and cancels a pending DeepSeek retry", async () => {
-  const registration = captureRequestErrorListener(async () => false);
-  let delegated = 0;
-  const next = async () => {
-    delegated += 1;
-    return { kind: "downstream" };
+test("leaves unrelated failures and non-Gemini streams unchanged", async () => {
+  const unrelated = {
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: { message: "upstream unavailable", code: "SERVER" },
+    },
   };
+  const source = (async function* () {
+    yield { type: "block-start", index: 0, blockType: "tool-call" };
+    yield unrelated;
+  })();
 
   assert.deepEqual(
-    await registration.listener(
-      {
-        agent: { options: { model: "gpt-5.6-sol" } },
-        failure: { status: 503 },
-        signal: new AbortController().signal,
-      },
-      next,
-    ),
-    { kind: "downstream" },
+    await collect(recoverGeminiToolCallStream("gemini-3.7-flash", source)),
+    [
+      { type: "block-start", index: 0, blockType: "tool-call" },
+      unrelated,
+    ],
   );
 
-  assert.equal(
-    await registration.listener(
-      {
-        agent: { options: { model: "deepseek-v3.2" } },
-        failure: { status: 503 },
-        signal: new AbortController().signal,
-      },
-      next,
-    ),
-    undefined,
+  const nonGeminiSource = (async function* () {
+    yield unrelated;
+  })();
+  const nonGeminiResult = await collect(
+    recoverGeminiToolCallStream("deepseek-v4-flash", nonGeminiSource),
   );
-  assert.equal(delegated, 1);
+  assert.deepEqual(nonGeminiResult, [unrelated]);
+});
+
+test("registers the Gemini stream recovery waterfall", async () => {
+  const registration = captureStreamListener();
+  assert.deepEqual(registration.options, { global: true });
+
+  const source = (async function* () {
+    yield { type: "block-start", index: 0, blockType: "tool-call" };
+    yield {
+      type: "tool-call-delta",
+      index: 0,
+      id: "call-3",
+      name: "pwsh",
+      argumentsDelta: "{}",
+    };
+    yield {
+      type: "finish",
+      reason: {
+        kind: "error",
+        failure: {
+          message: "Cannot read properties of undefined (reading 'startsWith')",
+        },
+      },
+    };
+  })();
+
+  const result = await collect(
+    registration.listener({ model: "gemini-3.7-flash" }, () => source),
+  );
+  assert.equal(result.at(-1).reason.kind, "tool-calls");
 });

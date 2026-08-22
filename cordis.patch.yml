@@ -1,4 +1,4 @@
 # Activate the model compatibility plugin as a DSH bundle layer.
 - insert:
-    - id: gpt-pwsh-compat
-      name: '@wanglele/dsh-gpt-pwsh-compat'
+    - id: wanglele
+      name: '@wanglele/dsh-wanglele'

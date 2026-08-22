@@ -1,48 +1,35 @@
-# DSH Model Compatibility Plugin
+# @wanglele/dsh-wanglele
 
-This plugin provides model-specific compatibility fixes for DeepSeek Harness.
+DSH 模型兼容性与自定义系统提示词增强插件（DeepSeek Harness Plugin）。
 
-## Features
+## 功能特性 (Features)
 
-### Fix GPT and Gemini 3 Flash tool-call failures
+### 1. ⚙️ 自定义系统提示词（Wanglele 设置面板，支持热加载）
+- **官方设置面板集成**：在 DSH 设置（Settings）中添加 **「Wanglele」** 分区。
+- **自定义系统提示词注入**：支持开启/关闭自定义系统提示词，为 AI Agent 注入专属角色、工作规范或个性设定。
+- **支持 3 种注入模式**：
+  - **追加到末尾 (Append - 推荐)**：保留 DSH 原生工具提示词与框架指引，在末尾附加上下文。
+  - **置于开头 (Prepend)**：置于最前列，增强优先级。
+  - **完全替换 (Replace)**：仅使用你输入的自定义提示词。
+- **⚡ 热加载即时生效 (Hot-Reloading)**：通过 DSH 动态设置响应系统，保存后**无需重启 DSH、无需刷新页面**，下一次模型对话轮次立即生效。
+- **自适应高输入框与高度记忆**：
+  - 默认采用舒适的高输入框（`280px+`，支持垂直自由拖拽缩放）。
+  - **自动持久化记忆高度**：手动拖动调节的高度会自动存储，下次打开保持你的偏好。
+  - 提供「清空」、「填入推荐模板」、「重置高度」等快捷操作与实时字数/行数统计。
 
-When the selected model id matches `^gpt` or a Gemini 3 Flash model id such as
-`gemini-3.7-flash`, the plugin removes two escalation properties from the
-model-visible `pwsh` and `edit` tool schemas:
+### 2. 🛠️ GPT / Gemini 工具调用 Schema 兼容补丁
+- 识别 `gpt-*` 与 `gemini-3.*-flash` 等大模型。
+- 自动剔除 `pwsh` 与 `edit` 工具中容易触发第三方中转站/网关校验报错的 `sandbox_permissions` 与 `justification` 递归嵌套字段，防止 400 校验异常。
 
-- `sandbox_permissions`
-- `justification`
+### 3. 🔄 Gemini 3 Flash 流式工具调用自动恢复
+- 自动捕获部分中转网关在 Gemini 3 Flash 下缺失 `arguments` 导致的 `startsWith` 流解析异常。
+- 自动拼接已接收的参数切片并优雅补全闭合 tool-call 块，避免任务中断。
 
-Some OpenAI Responses-compatible model routes eagerly populate every optional
-property. In DSH `0.1.0-rc.6`, that can produce either of these errors before
-the tool starts:
+---
 
-```text
-invalid justification: expected a non-empty sentence
-sandbox escalation to "danger-full-access" is not strictly wider than this call's current "danger-full-access" mode
-```
+## 安装 (Install)
 
-### Recover malformed Gemini tool streams
-
-Some Gemini 3 Flash routes behind an OpenAI Responses-compatible gateway emit a
-`response.function_call_arguments.done` event without its required `arguments`
-string. The installed `pi-ai` parser then fails with:
-
-```text
-Cannot read properties of undefined (reading 'startsWith')
-```
-
-The plugin wraps the DSH `llm/stream` waterfall for Gemini 3 Flash, preserves
-the tool-call argument deltas already received, closes the incomplete tool call,
-and converts the malformed error finish into a normal tool-call finish. Other
-models, stream failures, and incomplete calls without a tool name continue
-through normal error handling.
-
-Other model families and tool executors remain unchanged by these fixes.
-
-## Install
-
-Run these commands in PowerShell 7:
+在 PowerShell 中执行：
 
 ```powershell
 Set-Location E:\Github\dsh-wanglele
@@ -50,36 +37,19 @@ dsh plugin --profile headless add .
 dsh plugin --profile web add .
 ```
 
-The package declares a DSH bundle patch, so installation also adds it to the
-selected profile's `dsh.profile.bundles` list.
+---
 
-## Verify
+## 验证与测试 (Test & Verify)
 
 ```powershell
 npm test
-dsh --profile headless --dump-config | Select-String 'gpt-pwsh-compat'
-dsh --profile web --dump-config | Select-String 'gpt-pwsh-compat'
 ```
 
-## Implementation
+---
 
-For GPT and Gemini 3 Flash, the plugin participates in the authoritative
-`system-prompt/assemble` waterfall. It waits for downstream model selection,
-reads `assembled.variables.model`, and clones only the model-visible `pwsh` and
-`edit` schema. The original tool registration and execution callbacks remain
-intact.
+## 版本日志 (Changelog)
 
-For Gemini 3 Flash, the plugin also wraps the global `llm/stream` waterfall. It
-tracks open tool calls and their argument deltas. If the known pi-ai
-`startsWith` failure arrives before the tool-call block closes, it emits the
-missing block end and a `{ kind: "tool-calls" }` finish so the normal DSH tool
-scheduler can execute the call.
-
-## Compatibility
-
-- DeepSeek Harness: `0.1.0-rc.6`
-- Node.js: `20` or newer
-- Platform: any DSH host
+详见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## License
 

@@ -3,6 +3,12 @@ import assert from "node:assert/strict";
 
 import {
   apply,
+  applyCustomPrompt,
+  applyCustomPromptContext,
+  createCustomPromptContextMessage,
+  CUSTOM_PROMPT_SECTION_NAME,
+  DEFAULT_SETTINGS,
+  getVisibleCustomPromptState,
   inject,
   isGeminiFlashModel,
   isGeminiToolStreamFailure,
@@ -12,6 +18,8 @@ import {
   patchGptToolSchema,
   patchPwshSchema,
   recoverGeminiToolCallStream,
+  resolveSettings,
+  WANGLELE_SETTINGS_NS,
 } from "../lib/index.js";
 
 function pwshSchema() {
@@ -62,26 +70,39 @@ function editSchema() {
   };
 }
 
-function captureListeners() {
+function captureListeners(config = {}, fakeSettings = null) {
   const registrations = [];
-  apply({
+  const fakeCtx = {
+    inject(services, callback) {
+      if (services.includes("settings") && fakeSettings) {
+        callback({ settings: fakeSettings });
+      }
+    },
     on(event, listener, options) {
       const registration = { event, listener, options };
       registrations.push(registration);
       return () => true;
     },
-  });
+  };
+
+  apply(fakeCtx, config);
   return registrations;
 }
 
-function captureAssemblyListener() {
-  return captureListeners().find(
+function capturePreStepListener(config = {}, fakeSettings = null) {
+  return captureListeners(config, fakeSettings).find(
+    (registration) => registration.event === "agent/pre-step",
+  );
+}
+
+function captureAssemblyListener(config = {}, fakeSettings = null) {
+  return captureListeners(config, fakeSettings).find(
     (registration) => registration.event === "system-prompt/assemble",
   );
 }
 
-function captureStreamListener() {
-  return captureListeners().find(
+function captureStreamListener(config = {}) {
+  return captureListeners(config).find(
     (registration) => registration.event === "llm/stream",
   );
 }
@@ -92,20 +113,276 @@ async function collect(stream) {
   return chunks;
 }
 
-test("exports a globally scoped DSH compatibility plugin", () => {
-  assert.equal(name, "gpt-pwsh-compat");
+test("exports plugin constants and metadata", () => {
+  assert.equal(name, "wanglele");
   assert.deepEqual(inject, ["systemPrompt", "agents"]);
+  assert.equal(WANGLELE_SETTINGS_NS, "wanglele");
+  assert.equal(CUSTOM_PROMPT_SECTION_NAME, "wanglele:custom-system-prompt");
+  assert.equal(DEFAULT_SETTINGS.customPromptEnabled, false);
+  assert.equal(DEFAULT_SETTINGS.promptPosition, "append");
+  assert.equal(DEFAULT_SETTINGS.textareaHeight, 280);
+});
 
-  const registrations = captureListeners();
-  assert.equal(registrations.length, 2);
-  const assembly = registrations.find(
-    (registration) => registration.event === "system-prompt/assemble",
+test("resolves raw settings with default fallbacks", () => {
+  assert.deepEqual(resolveSettings(undefined), DEFAULT_SETTINGS);
+  assert.deepEqual(resolveSettings({}), DEFAULT_SETTINGS);
+
+  const custom = resolveSettings({
+    customPromptEnabled: true,
+    customPrompt: "Hello Agent",
+    promptPosition: "prepend",
+    textareaHeight: 450,
+  });
+
+  assert.equal(custom.customPromptEnabled, true);
+  assert.equal(custom.customPrompt, "Hello Agent");
+  assert.equal(custom.promptPosition, "prepend");
+  assert.equal(custom.textareaHeight, 450);
+  assert.equal(custom.gptCompatEnabled, true);
+});
+
+test("applyCustomPrompt injects custom prompt in append mode (default)", () => {
+  const baseAssembly = {
+    sections: [{ name: "base:prompt", text: "You are an AI." }],
+  };
+
+  const result = applyCustomPrompt(baseAssembly, {
+    customPromptEnabled: true,
+    customPrompt: "You are a specialized coding agent.",
+    promptPosition: "append",
+  });
+
+  assert.equal(result.sections.length, 2);
+  assert.equal(result.sections[0].name, "base:prompt");
+  assert.equal(result.sections[1].name, CUSTOM_PROMPT_SECTION_NAME);
+  assert.equal(result.sections[1].text, "You are a specialized coding agent.");
+});
+
+test("applyCustomPrompt injects custom prompt in prepend mode", () => {
+  const baseAssembly = {
+    sections: [{ name: "base:prompt", text: "You are an AI." }],
+  };
+
+  const result = applyCustomPrompt(baseAssembly, {
+    customPromptEnabled: true,
+    customPrompt: "Priority Rule: Answer in Chinese.",
+    promptPosition: "prepend",
+  });
+
+  assert.equal(result.sections.length, 2);
+  assert.equal(result.sections[0].name, CUSTOM_PROMPT_SECTION_NAME);
+  assert.equal(result.sections[0].text, "Priority Rule: Answer in Chinese.");
+  assert.equal(result.sections[1].name, "base:prompt");
+});
+
+test("applyCustomPrompt replaces all sections in replace mode", () => {
+  const baseAssembly = {
+    sections: [
+      { name: "harness:identity", text: "DeepSeek Harness" },
+      { name: "base:persona", text: "Standard Persona" },
+    ],
+  };
+
+  const result = applyCustomPrompt(baseAssembly, {
+    customPromptEnabled: true,
+    customPrompt: "Standalone system prompt",
+    promptPosition: "replace",
+  });
+
+  assert.equal(result.sections.length, 1);
+  assert.equal(result.sections[0].name, CUSTOM_PROMPT_SECTION_NAME);
+  assert.equal(result.sections[0].text, "Standalone system prompt");
+});
+
+test("applyCustomPrompt skips injection if disabled or empty text", () => {
+  const baseAssembly = {
+    sections: [{ name: "base:prompt", text: "You are an AI." }],
+  };
+
+  const disabledResult = applyCustomPrompt(baseAssembly, {
+    customPromptEnabled: false,
+    customPrompt: "Some prompt",
+  });
+  assert.equal(disabledResult, baseAssembly);
+
+  const emptyResult = applyCustomPrompt(baseAssembly, {
+    customPromptEnabled: true,
+    customPrompt: "   ",
+  });
+  assert.equal(emptyResult, baseAssembly);
+});
+
+test("createCustomPromptContextMessage builds valid frozen DSH context user message", () => {
+  const msg = createCustomPromptContextMessage("My Custom Prompt", "wanglele");
+  assert.equal(msg.role, "user");
+  assert.equal(typeof msg.id, "string");
+  assert.deepEqual(msg.content, [{ type: "text", text: "My Custom Prompt" }]);
+  assert.deepEqual(msg.source, { kind: "plugin", plugin: "wanglele" });
+  assert.equal(Object.isFrozen(msg), true);
+});
+
+test("applyCustomPromptContext injects in append mode (default)", () => {
+  const userMsg = { role: "user", content: [{ type: "text", text: "Hello" }] };
+  const result = applyCustomPromptContext([userMsg], {
+    customPromptEnabled: true,
+    customPrompt: "Always respond politely.",
+    promptPosition: "append",
+  });
+
+  assert.equal(result.length, 2);
+  assert.equal(result[0], userMsg);
+  assert.equal(result[1].role, "user");
+  assert.equal(result[1].content[0].text, "Always respond politely.");
+  assert.equal(result[1].source.plugin, "wanglele");
+});
+
+test("applyCustomPromptContext injects in prepend mode", () => {
+  const userMsg = { role: "user", content: [{ type: "text", text: "Hello" }] };
+  const result = applyCustomPromptContext([userMsg], {
+    customPromptEnabled: true,
+    customPrompt: "Always respond politely.",
+    promptPosition: "prepend",
+  });
+
+  assert.equal(result.length, 2);
+  assert.equal(result[0].role, "user");
+  assert.equal(result[0].content[0].text, "Always respond politely.");
+  assert.equal(result[1], userMsg);
+});
+
+test("applyCustomPromptContext replaces messages in replace mode", () => {
+  const userMsg = { role: "user", content: [{ type: "text", text: "Hello" }] };
+  const result = applyCustomPromptContext([userMsg], {
+    customPromptEnabled: true,
+    customPrompt: "Replaced content",
+    promptPosition: "replace",
+  });
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].content[0].text, "Replaced content");
+});
+
+test("applyCustomPromptContext skips when disabled or empty", () => {
+  const userMsg = { role: "user", content: [{ type: "text", text: "Hello" }] };
+  const disabled = applyCustomPromptContext([userMsg], {
+    customPromptEnabled: false,
+    customPrompt: "Test",
+  });
+  assert.deepEqual(disabled, [userMsg]);
+
+  const empty = applyCustomPromptContext([userMsg], {
+    customPromptEnabled: true,
+    customPrompt: "   ",
+  });
+  assert.deepEqual(empty, [userMsg]);
+});
+
+test("hot-reloads custom context injection during agent pre-step", async () => {
+  let watcherCallback = null;
+  let storedSettings = {
+    customPromptEnabled: false,
+    customPrompt: "",
+    promptPosition: "append",
+  };
+
+  const fakeSettingsService = {
+    register(ns, schema, opts) {
+      assert.equal(ns, "wanglele");
+      return {
+        get: () => storedSettings,
+        watch: (cb) => {
+          watcherCallback = cb;
+        },
+      };
+    },
+  };
+
+  const registration = capturePreStepListener({}, fakeSettingsService);
+  const userMsg = { role: "user", content: [{ type: "text", text: "User Input" }] };
+
+  // Turn 1, Step 1: Disabled
+  let decision1 = await registration.listener(
+    { agent: { session: { events: [], surface: { nodes: [] } } }, turn: 1, step: 1, signal: {} },
+    async () => ({ kind: "enter", messages: [userMsg] }),
   );
-  const stream = registrations.find(
-    (registration) => registration.event === "llm/stream",
+  assert.equal(decision1.messages.length, 1);
+
+  // Turn 1, Step 2: Skip non-first step
+  storedSettings = {
+    customPromptEnabled: true,
+    customPrompt: "Live Custom Prompt",
+    promptPosition: "append",
+  };
+  watcherCallback(storedSettings);
+
+  let decisionStep2 = await registration.listener(
+    { agent: { session: { events: [], surface: { nodes: [] } } }, turn: 1, step: 2, signal: {} },
+    async () => ({ kind: "enter", messages: [userMsg] }),
   );
-  assert.deepEqual(assembly.options, { global: true });
-  assert.deepEqual(stream.options, { global: true });
+  assert.equal(decisionStep2.messages.length, 1);
+
+  // Turn 2, Step 1: Active and injected
+  const agentSession = {
+    events: [],
+    surface: { nodes: [] },
+  };
+  let decision2 = await registration.listener(
+    { agent: { session: agentSession }, turn: 2, step: 1, signal: {} },
+    async () => ({ kind: "enter", messages: [userMsg] }),
+  );
+  assert.equal(decision2.messages.length, 2);
+  assert.equal(decision2.messages[1].content[0].text, "Live Custom Prompt");
+  assert.equal(decision2.messages[1].source.plugin, "wanglele");
+
+  // Simulate DSH recording the injected message into session events & surface
+  agentSession.events.push({
+    seq: 0,
+    type: "user/message",
+    data: decision2.messages[1],
+  });
+  agentSession.surface.nodes.push(0);
+
+  // Turn 3, Step 1 (Subsequent turn): Should NOT re-inject because it's already visible in surface.nodes!
+  let decision3 = await registration.listener(
+    { agent: { session: agentSession }, turn: 3, step: 1, signal: {} },
+    async () => ({ kind: "enter", messages: [userMsg] }),
+  );
+  assert.equal(decision3.messages.length, 1, "Subsequent turn should skip injection if visible");
+
+  // Context Compaction occurs: surface.nodes no longer contains seq 0
+  agentSession.surface.nodes = [];
+
+  // Turn 4, Step 1 (After compaction): Automatically RE-INJECTS!
+  let decision4 = await registration.listener(
+    { agent: { session: agentSession }, turn: 4, step: 1, signal: {} },
+    async () => ({ kind: "enter", messages: [userMsg] }),
+  );
+  assert.equal(decision4.messages.length, 2, "Re-injects after context compaction clears surface nodes");
+  assert.equal(decision4.messages[1].content[0].text, "Live Custom Prompt");
+
+  // Prompt updated dynamically
+  storedSettings = {
+    customPromptEnabled: true,
+    customPrompt: "Updated Prompt Content",
+    promptPosition: "append",
+  };
+  watcherCallback(storedSettings);
+
+  // Add the newly injected message to events and surface
+  agentSession.events.push({
+    seq: 1,
+    type: "user/message",
+    data: decision4.messages[1],
+  });
+  agentSession.surface.nodes.push(1);
+
+  // Turn 5, Step 1 (Prompt changed): RE-INJECTS new prompt!
+  let decision5 = await registration.listener(
+    { agent: { session: agentSession }, turn: 5, step: 1, signal: {} },
+    async () => ({ kind: "enter", messages: [userMsg] }),
+  );
+  assert.equal(decision5.messages.length, 2, "Re-injects when custom prompt text is updated");
+  assert.equal(decision5.messages[1].content[0].text, "Updated Prompt Content");
 });
 
 test("matches only conservative GPT model identifiers", () => {

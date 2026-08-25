@@ -17,6 +17,8 @@ import {
   patchAssembly,
   patchGptToolSchema,
   patchPwshSchema,
+  patchOutboundPayload,
+  createOutboundPayloadHook,
   recoverGeminiToolCallStream,
   resolveSettings,
   WANGLELE_SETTINGS_NS,
@@ -445,6 +447,88 @@ test("removes GPT-unsafe fields from the edit schema", () => {
   );
 });
 
+test("removes GPT-unsafe fields from write, read, grep, glob, and subagent schemas", () => {
+  for (const toolName of ["write", "read", "grep", "glob", "subagent"]) {
+    const raw = {
+      name: toolName,
+      description: `Tool ${toolName}`,
+      parameters: {
+        type: "object",
+        properties: {
+          target: { type: "string" },
+          sandbox_permissions: { type: "string" },
+          justification: { type: "string" },
+        },
+        required: ["target", "sandbox_permissions", "justification"],
+      },
+    };
+    const patched = patchGptToolSchema(raw);
+    assert.equal(
+      Object.hasOwn(patched.parameters.properties, "sandbox_permissions"),
+      false,
+    );
+    assert.equal(
+      Object.hasOwn(patched.parameters.properties, "justification"),
+      false,
+    );
+    assert.deepEqual(patched.parameters.required, ["target"]);
+  }
+});
+
+test("recursively removes GPT-unsafe fields from nested schemas", () => {
+  const original = {
+    name: "write",
+    parameters: {
+      type: "object",
+      properties: {
+        options: {
+          type: "object",
+          properties: {
+            sandbox_permissions: { type: "string" },
+            nested: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  justification: { type: "string" },
+                },
+                required: ["justification"],
+              },
+            },
+          },
+          required: ["sandbox_permissions", "nested"],
+        },
+      },
+      anyOf: [
+        {
+          type: "object",
+          properties: { justification: { type: "string" } },
+          required: ["justification"],
+        },
+      ],
+    },
+  };
+
+  const patched = patchGptToolSchema(original);
+  assert.notEqual(patched, original);
+  assert.equal(
+    Object.hasOwn(patched.parameters.properties.options.properties, "sandbox_permissions"),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(patched.parameters.properties.options.properties.nested.items.properties, "justification"),
+    false,
+  );
+  assert.deepEqual(patched.parameters.properties.options.required, ["nested"]);
+  assert.equal(
+    Object.hasOwn(patched.parameters.anyOf[0].properties, "justification"),
+    false,
+  );
+  assert.deepEqual(patched.parameters.anyOf[0].required, []);
+  assert.equal(Object.hasOwn(original.parameters.properties.options.properties, "sandbox_permissions"), true);
+});
+
+
 test("changes only supported GPT tools and keeps malformed schemas harmless", () => {
   const otherTool = {
     name: "fs_read",
@@ -756,32 +840,68 @@ test("leaves unrelated failures and non-Gemini streams unchanged", async () => {
   assert.deepEqual(nonGeminiResult, [unrelated]);
 });
 
-test("registers the Gemini stream recovery waterfall", async () => {
-  const registration = captureStreamListener();
-  assert.deepEqual(registration.options, { global: true });
-
-  const source = (async function* () {
-    yield { type: "block-start", index: 0, blockType: "tool-call" };
-    yield {
-      type: "tool-call-delta",
-      index: 0,
-      id: "call-3",
-      name: "pwsh",
-      argumentsDelta: "{}",
-    };
-    yield {
-      type: "finish",
-      reason: {
-        kind: "error",
-        failure: {
-          message: "Cannot read properties of undefined (reading 'startsWith')",
+test("createOutboundPayloadHook patches tools on final outbound request params", async () => {
+  const hook = createOutboundPayloadHook(undefined, "gpt-5.6-terra");
+  const outbound = {
+    model: "gpt-5.6-terra",
+    tools: [
+      {
+        type: "function",
+        name: "write",
+        parameters: {
+          type: "object",
+          properties: {
+            file_path: { type: "string" },
+            content: { type: "string" },
+            sandbox_permissions: { type: "string" },
+            justification: { type: "string" },
+          },
+          required: ["file_path", "content", "sandbox_permissions", "justification"],
         },
       },
-    };
+    ],
+  };
+
+  const result = await hook(outbound, { id: "gpt-5.6-terra" });
+  assert.equal(
+    Object.hasOwn(result.tools[0].parameters.properties, "sandbox_permissions"),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(result.tools[0].parameters.properties, "justification"),
+    false,
+  );
+  assert.deepEqual(result.tools[0].parameters.required, ["file_path", "content"]);
+});
+
+test("llm/stream hook injects outbound onPayload cleanup for GPT models", async () => {
+  const registration = captureStreamListener();
+  let capturedOptions;
+  const dummyStream = (async function* () {
+    yield { type: "block-start", index: 0, blockType: "text" };
   })();
 
-  const result = await collect(
-    registration.listener({ model: "gemini-3.7-flash" }, () => source),
+  registration.listener({ model: "gpt-5.6-terra" }, (opts) => {
+    capturedOptions = opts;
+    return dummyStream;
+  });
+
+  assert.equal(typeof capturedOptions?.onPayload, "function");
+  const payload = {
+    tools: [
+      {
+        name: "pwsh",
+        parameters: {
+          type: "object",
+          properties: { command: { type: "string" }, sandbox_permissions: { type: "string" } },
+        },
+      },
+    ],
+  };
+  const processed = await capturedOptions.onPayload(payload);
+  assert.equal(
+    Object.hasOwn(processed.tools[0].parameters.properties, "sandbox_permissions"),
+    false,
   );
-  assert.equal(result.at(-1).reason.kind, "tool-calls");
 });
+

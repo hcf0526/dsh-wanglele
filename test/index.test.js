@@ -387,6 +387,25 @@ test("hot-reloads custom context injection during agent pre-step", async () => {
   assert.equal(decision5.messages[1].content[0].text, "Updated Prompt Content");
 });
 
+test("reads current DSH session log for prompt visibility", async () => {
+  const session = {
+    log: [{
+      seq: 3,
+      type: "user/message",
+      data: {
+        role: "user",
+        content: [{ type: "text", text: "Current prompt" }],
+        source: { kind: "plugin", plugin: "wanglele" },
+      },
+    }],
+    snapshotEvents: () => session.log,
+    surface: { nodes: [3] },
+  };
+  const state = getVisibleCustomPromptState({ session });
+  assert.equal(state.text, "Current prompt");
+  assert.equal(state.seq, 3);
+});
+
 test("matches only conservative GPT model identifiers", () => {
   assert.equal(isGptModel("gpt-5.6-sol"), true);
   assert.equal(isGptModel("GPT-4o"), true);

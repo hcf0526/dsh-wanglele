@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-09-06
+
+### Fixed
+- **修复自定义系统提示词上下文注入的 Session 日志兼容性**：
+  - 读取当前 DSH Session 的 `snapshotEvents()` 与 `log` 数据，兼容旧版 `events` 字段。
+  - 依据当前可见上下文识别已注入消息，避免同一会话表面重复注入，并支持上下文压缩后的再次注入。
+  - 增加当前 Session API 的回归测试。
+
+## [0.1.5] - 2026-08-23
+
+### Fixed
+- **修复 GPT 系列模型文件工具调用兼容性**。
+
 ## [0.1.4] - 2026-08-22
 
 ### Added

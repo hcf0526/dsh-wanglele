@@ -5,9 +5,13 @@ import {
   apply,
   applyCustomPrompt,
   applyCustomPromptContext,
+  AUTO_RETRY_CONTINUE_TEXT,
+  createAutoRetryEngine,
+  createContinueUserMessage,
   createCustomPromptContextMessage,
   CUSTOM_PROMPT_SECTION_NAME,
   DEFAULT_SETTINGS,
+  evaluateAutoRetry,
   getVisibleCustomPromptState,
   inject,
   isGeminiFlashModel,
@@ -21,6 +25,7 @@ import {
   createOutboundPayloadHook,
   recoverGeminiToolCallStream,
   resolveSettings,
+  turnHasAssistantText,
   WANGLELE_SETTINGS_NS,
 } from "../lib/index.js";
 
@@ -123,6 +128,9 @@ test("exports plugin constants and metadata", () => {
   assert.equal(DEFAULT_SETTINGS.customPromptEnabled, false);
   assert.equal(DEFAULT_SETTINGS.promptPosition, "append");
   assert.equal(DEFAULT_SETTINGS.textareaHeight, 280);
+  assert.equal(DEFAULT_SETTINGS.autoRetryEnabled, false);
+  assert.equal(DEFAULT_SETTINGS.autoRetryDelaySeconds, 5);
+  assert.equal(DEFAULT_SETTINGS.autoRetryMaxFailures, 3);
 });
 
 test("resolves raw settings with default fallbacks", () => {
@@ -141,6 +149,18 @@ test("resolves raw settings with default fallbacks", () => {
   assert.equal(custom.promptPosition, "prepend");
   assert.equal(custom.textareaHeight, 450);
   assert.equal(custom.gptCompatEnabled, true);
+  assert.equal(custom.autoRetryEnabled, false);
+  assert.equal(custom.autoRetryDelaySeconds, 5);
+  assert.equal(custom.autoRetryMaxFailures, 3);
+
+  const retry = resolveSettings({
+    autoRetryEnabled: true,
+    autoRetryDelaySeconds: 8.4,
+    autoRetryMaxFailures: 0,
+  });
+  assert.equal(retry.autoRetryEnabled, true);
+  assert.equal(retry.autoRetryDelaySeconds, 8);
+  assert.equal(retry.autoRetryMaxFailures, 1);
 });
 
 test("applyCustomPrompt injects custom prompt in append mode (default)", () => {
@@ -921,6 +941,212 @@ test("llm/stream hook injects outbound onPayload cleanup for GPT models", async 
   assert.equal(
     Object.hasOwn(processed.tools[0].parameters.properties, "sandbox_permissions"),
     false,
+  );
+});
+
+test("evaluateAutoRetry retries failed turns and stops after consecutive empty failures", () => {
+  assert.equal(
+    evaluateAutoRetry({
+      enabled: false,
+      reasonKind: "error",
+      hasAssistantText: false,
+      consecutiveCompleteFailures: 2,
+      maxFailures: 3,
+    }).action,
+    "idle",
+  );
+  assert.deepEqual(
+    evaluateAutoRetry({
+      enabled: true,
+      reasonKind: "completed",
+      hasAssistantText: true,
+      consecutiveCompleteFailures: 2,
+      maxFailures: 3,
+    }),
+    { action: "reset", consecutiveCompleteFailures: 0 },
+  );
+  assert.deepEqual(
+    evaluateAutoRetry({
+      enabled: true,
+      reasonKind: "error",
+      hasAssistantText: true,
+      consecutiveCompleteFailures: 2,
+      maxFailures: 3,
+    }),
+    { action: "retry", consecutiveCompleteFailures: 0 },
+  );
+  assert.deepEqual(
+    evaluateAutoRetry({
+      enabled: true,
+      reasonKind: "error",
+      hasAssistantText: false,
+      consecutiveCompleteFailures: 0,
+      maxFailures: 3,
+    }),
+    { action: "retry", consecutiveCompleteFailures: 1 },
+  );
+  assert.deepEqual(
+    evaluateAutoRetry({
+      enabled: true,
+      reasonKind: "error",
+      hasAssistantText: false,
+      consecutiveCompleteFailures: 2,
+      maxFailures: 3,
+    }),
+    { action: "stop", consecutiveCompleteFailures: 3 },
+  );
+  assert.equal(
+    evaluateAutoRetry({
+      enabled: true,
+      reasonKind: "aborted",
+      hasAssistantText: false,
+      consecutiveCompleteFailures: 2,
+      maxFailures: 3,
+    }).action,
+    "cancel",
+  );
+});
+
+test("turnHasAssistantText only counts visible model text in that turn", () => {
+  const events = [
+    { type: "turn/start", data: { turn: 1 } },
+    {
+      type: "assistant/message",
+      data: { message: { content: [{ type: "text", text: "hello" }] } },
+    },
+    { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } },
+    { type: "turn/start", data: { turn: 2 } },
+    {
+      type: "assistant/message",
+      data: { message: { content: [{ type: "tool-call", name: "pwsh" }] } },
+    },
+    { type: "turn/end", data: { turn: 2, reason: { kind: "error" } } },
+  ];
+  assert.equal(turnHasAssistantText(events, 1), true);
+  assert.equal(turnHasAssistantText(events, 2), false);
+});
+
+test("createContinueUserMessage builds a visible user continue prompt", () => {
+  const message = createContinueUserMessage();
+  assert.equal(message.role, "user");
+  assert.equal(message.content[0].text, AUTO_RETRY_CONTINUE_TEXT);
+  assert.equal(message.source.kind, "user");
+  assert.equal(message.source.plugin, "wanglele");
+  assert.equal(message.source.form, "auto-retry");
+});
+
+test("auto-retry engine sends 继续 after a failed turn", async () => {
+  const session = {
+    id: "s1",
+    events: [
+      { type: "turn/start", data: { turn: 1 } },
+      { type: "turn/end", data: { turn: 1, reason: { kind: "error", error: { message: "boom" } } } },
+    ],
+  };
+  const followups = [];
+  const agent = {
+    session,
+    status: "idle",
+    inbox: { hasPending: false },
+    followup(message) {
+      followups.push(message);
+    },
+  };
+  const engine = createAutoRetryEngine({
+    getSettings: () => ({
+      autoRetryEnabled: true,
+      autoRetryDelaySeconds: 5,
+      autoRetryMaxFailures: 3,
+    }),
+    delay: async () => true,
+  });
+
+  await engine.onSessionEvent(
+    session,
+    session.events[1],
+    { agents: { get: () => agent } },
+  );
+
+  assert.equal(followups.length, 1);
+  assert.equal(followups[0].content[0].text, "继续");
+});
+
+test("auto-retry engine stops after consecutive empty failures", async () => {
+  const session = { id: "s2", events: [] };
+  const followups = [];
+  const agent = {
+    session,
+    status: "idle",
+    inbox: { hasPending: false },
+    followup(message) {
+      followups.push(message);
+    },
+  };
+  const engine = createAutoRetryEngine({
+    getSettings: () => ({
+      autoRetryEnabled: true,
+      autoRetryDelaySeconds: 1,
+      autoRetryMaxFailures: 2,
+    }),
+    delay: async () => true,
+  });
+  const ctx = { agents: { get: () => agent } };
+
+  session.events = [
+    { type: "turn/start", data: { turn: 1 } },
+    { type: "turn/end", data: { turn: 1, reason: { kind: "error" } } },
+  ];
+  await engine.onSessionEvent(session, session.events[1], ctx);
+  assert.equal(followups.length, 1);
+
+  session.events = [
+    { type: "turn/start", data: { turn: 2 } },
+    { type: "turn/end", data: { turn: 2, reason: { kind: "error" } } },
+  ];
+  await engine.onSessionEvent(session, session.events[1], ctx);
+  assert.equal(followups.length, 1);
+});
+
+test("auto-retry engine ignores successful turns", async () => {
+  const session = {
+    id: "s3",
+    events: [
+      { type: "turn/start", data: { turn: 1 } },
+      {
+        type: "assistant/message",
+        data: { message: { content: [{ type: "text", text: "ok" }] } },
+      },
+      { type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } },
+    ],
+  };
+  const followups = [];
+  const engine = createAutoRetryEngine({
+    getSettings: () => ({ autoRetryEnabled: true, autoRetryMaxFailures: 3 }),
+    delay: async () => true,
+  });
+  await engine.onSessionEvent(
+    session,
+    session.events[2],
+    {
+      agents: {
+        get: () => ({
+          session,
+          status: "idle",
+          followup(message) {
+            followups.push(message);
+          },
+        }),
+      },
+    },
+  );
+  assert.equal(followups.length, 0);
+});
+
+test("apply registers a session/event auto-retry listener", () => {
+  const registrations = captureListeners();
+  assert.equal(
+    registrations.some((registration) => registration.event === "session/event"),
+    true,
   );
 });
 

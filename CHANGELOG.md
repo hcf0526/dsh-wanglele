@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-09-07
+
+### Added
+- **对话失败后自动重试**：
+  - 在输入栏「记录持久化」与模型选择之间加入「自动重试」滑动开关。
+  - 仅在对话以失败结束时，按设置延时（默认 5 秒）自动发送「继续」。
+  - 设置页可配置延时秒数与最大连续完全失败次数：模型连续多次未输出任何文字后停止自动重试；只要某次「继续」后模型回复了文字，连续计数清零。
+
 ## [0.1.6] - 2026-09-06
 
 ### Fixed

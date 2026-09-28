@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-09-08
+
+### Added
+- 恢复自定义系统提示词设置，支持追加、前置或替换提示词 section；通过当前 `systemPrompt.section()` 和 `system-prompt/assemble` 接口读取实时设置。
+
+### Changed
+- 使用当前 DSH 的 Schemastery `Config` volatile 字段管理重试和自定义提示词设置。
+- Host 监听当前 `session/event(session, event)` 事件，并从 volatile 配置读取实时值。
+- Client 使用 `configForms` 服务、`settings.section` 和 `conversation.input.activity` slots。
+- GPT/Gemini 工具兼容补丁和 Gemini 流式恢复功能仍保持关闭。
+
+
 ## [0.1.7] - 2026-09-07
 
 ### Added

@@ -154,6 +154,36 @@ test("turnHasAssistantText reads current DSH session log events", () => {
   assert.equal(turnHasAssistantText(events, 3), false);
 });
 
+test("turnHasAssistantText reads 0.2 assistant attempt stream records", () => {
+  const packedStreamEvents = [
+    { type: "turn/start", data: { turn: 3 } },
+    {
+      type: "assistant/attempt",
+      data: {
+        turn: 3,
+        step: 0,
+        stream: [{ type: "text-chunks", time0: 10, index: 0, dt: [], texts: ["partial output"] }],
+      },
+    },
+    { type: "turn/end", data: { turn: 3, reason: { kind: "error" } } },
+  ];
+  assert.equal(turnHasAssistantText(packedStreamEvents, 3), true);
+
+  const rawChunkEvents = [
+    { type: "turn/start", data: { turn: 4 } },
+    {
+      type: "assistant/attempt",
+      data: {
+        turn: 4,
+        step: 0,
+        stream: [{ type: "chunk", time: 10, chunk: { type: "text-delta", index: 0, text: "partial output" } }],
+      },
+    },
+    { type: "turn/end", data: { turn: 4, reason: { kind: "error" } } },
+  ];
+  assert.equal(turnHasAssistantText(rawChunkEvents, 4), true);
+});
+
 test("auto-retry engine sends Continue after a failed DSH turn", async () => {
   const events = [
     { type: "turn/start", data: { turn: 1 } },

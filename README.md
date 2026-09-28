@@ -1,6 +1,6 @@
 # @wanglele/dsh-wanglele
 
-DeepSeek Harness 自动重试与自定义系统提示词插件，适配 DSH `0.1.7-rc.2`。
+DeepSeek Harness 自动重试与自定义系统提示词插件，适配 DSH `0.2.0-rc.1`（DSH Desktop `44.0.0`）。
 
 ## 当前功能
 

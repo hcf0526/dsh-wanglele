@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-09-09
+
+### Changed
+- 更新 DSH peer 依赖至 `0.2.0-rc.1`，对应 DSH Desktop `44.0.0`。
+- 兼容当前 Session 的 `assistant/attempt` 流式结算记录：已输出文本但请求失败时不再被误判为完全失败。
+- 保留旧版 `assistant/chunk` 与 `settings.section` 注册兼容。
+
 ## [0.1.8] - 2026-09-08
 
 ### Added

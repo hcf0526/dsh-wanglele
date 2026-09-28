@@ -1,6 +1,6 @@
 {
   "name": "@wanglele/dsh-wanglele",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Auto-retry and custom system prompt plugin for DeepSeek Harness",
   "type": "module",
   "main": "./lib/index.js",
@@ -40,8 +40,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-agent": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.1",
     "@deepseek-ai/schemastery": "~3.18.4"
   },
   "engines": {

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-09-29
+
+### Changed
+- 更新 DSH peer 依赖至 `0.2.0-rc.2`（DSH Desktop `0.2.0-rc.2`）。
+- 按 RC2 的 Session API 优先读取公开事件日志，避免继续调用已弃用的 `snapshotEvents()`。
+- 保持对 RC2 `assistant/attempt` 压缩流和 `Agent.followup()` 用户消息格式的兼容。
+
 ## [0.1.9] - 2026-09-09
 
 ### Changed

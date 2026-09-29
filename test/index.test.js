@@ -15,6 +15,7 @@ import {
   inject,
   name,
   resolveSettings,
+  snapshotSessionEvents,
   turnHasAssistantText,
   WANGLELE_SETTINGS_NS,
 } from "../lib/index.js";
@@ -142,6 +143,15 @@ test("creates visible Continue user message", () => {
   assert.equal(message.role, "user");
   assert.equal(message.content[0].text, AUTO_RETRY_CONTINUE_TEXT);
   assert.deepEqual(message.source, { kind: "user", plugin: "wanglele", form: "auto-retry" });
+  assert.equal(typeof message.id, "string");
+});
+
+test("uses the RC2 session log and falls back to the legacy events array", () => {
+  const rc2Log = [{ type: "turn/start", data: { turn: 1 } }];
+  const legacyEvents = [{ type: "turn/start", data: { turn: 2 } }];
+  assert.equal(snapshotSessionEvents({ log: rc2Log, events: legacyEvents }), rc2Log);
+  assert.equal(snapshotSessionEvents({ events: legacyEvents }), legacyEvents);
+  assert.deepEqual(snapshotSessionEvents({}), []);
 });
 
 test("turnHasAssistantText reads current DSH session log events", () => {
@@ -189,7 +199,7 @@ test("auto-retry engine sends Continue after a failed DSH turn", async () => {
     { type: "turn/start", data: { turn: 1 } },
     { type: "turn/end", data: { turn: 1, reason: { kind: "error", error: { message: "failed", code: "UNKNOWN" } } } },
   ];
-  const session = { id: "session-1", snapshotEvents: () => events };
+  const session = { id: "session-1", log: events, snapshotEvents: () => assert.fail("RC2 deprecated snapshotEvents() must not be called") };
   const sent = [];
   const agent = { session, status: "idle", inbox: { hasPending: false }, followup: (message) => sent.push(message) };
   const engine = createAutoRetryEngine({

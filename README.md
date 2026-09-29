@@ -1,6 +1,6 @@
 # @wanglele/dsh-wanglele
 
-DeepSeek Harness 自动重试与自定义系统提示词插件，适配 DSH `0.2.0-rc.1`（DSH Desktop `44.0.0`）。
+DeepSeek Harness 自动重试与自定义系统提示词插件，适配 DSH `0.2.0-rc.2`。
 
 ## 当前功能
 
@@ -29,6 +29,7 @@ dsh plugin --profile web add .
 ## 验证
 
 ```powershell
+npm run check
 npm test
 ```
 
